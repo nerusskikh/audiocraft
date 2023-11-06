@@ -538,9 +538,10 @@ class ChromaStemConditioner(WaveformConditioner):
         self.sample_rate = sample_rate
         self.match_len_on_eval = match_len_on_eval
         self.duration = duration
-        self.__dict__['demucs'] = pretrained.get_model('htdemucs').to(device)
+        self.__dict__['demucs'] = pretrained.get_model('htdemucs_6s').to(device)
         stem_sources: list = self.demucs.sources  # type: ignore
-        self.stem_indices = torch.LongTensor([stem_sources.index('vocals'), stem_sources.index('other')]).to(device)
+        #self.stem_indices = torch.LongTensor([stem_sources.index('vocals'), stem_sources.index('other')]).to(device)
+        self.stem_indices = torch.LongTensor([stem_sources.index('guitar')]).to(device)
         self.chroma = ChromaExtractor(sample_rate=sample_rate, n_chroma=n_chroma,
                                       radix2_exp=radix2_exp, **kwargs).to(device)
         self.chroma_len = self._get_chroma_len()

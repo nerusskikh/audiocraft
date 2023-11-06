@@ -28,7 +28,7 @@ from ..utils.samples.manager import SampleManager
 from ..utils.utils import get_dataset_from_loader, is_jsonable, warn_once
 
 
-class MusicGenSolver(base.StandardSolver):
+class MusicGenSolverOld(base.StandardSolver):
     """Solver for MusicGen training task.
 
     Used in: https://arxiv.org/abs/2306.05284
@@ -703,3 +703,137 @@ class MusicGenSolver(base.StandardSolver):
                 metrics.update(self.common_train_valid('evaluate'))
             gen_metrics = self.evaluate_audio_generation()
             return {**metrics, **gen_metrics}
+
+class MusicGenSolver(MusicGenSolverOld):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        from demucs import pretrained
+        self.__dict__['demucs'] = pretrained.get_model('htdemucs_6s').to(self.device)
+        stem_sources: list = self.demucs.sources  # type: ignore
+        self.stem_indices = torch.LongTensor([stem_sources.index('drums'), stem_sources.index('bass'), 
+                                              stem_sources.index('other'), stem_sources.index('piano')
+                                             ]).to(self.device)
+
+
+    def _prepare_tokens_and_attributes(
+        self, batch: tp.Tuple[torch.Tensor, tp.List[SegmentWithAttributes]],
+        check_synchronization_points: bool = False
+    ) -> tp.Tuple[dict, torch.Tensor, torch.Tensor]:
+        """Prepare input batchs for language model training.
+
+        Args:
+            batch (tuple[torch.Tensor, list[SegmentWithAttributes]]): Input batch with audio tensor of shape [B, C, T]
+                and corresponding metadata as SegmentWithAttributes (with B items).
+            check_synchronization_points (bool): Whether to check for synchronization points slowing down training.
+        Returns:
+            Condition tensors (dict[str, any]): Preprocessed condition attributes.
+            Tokens (torch.Tensor): Audio tokens from compression model, of shape [B, K, T_s],
+                with B the batch size, K the number of codebooks, T_s the token timesteps.
+            Padding mask (torch.Tensor): Mask with valid positions in the tokens tensor, of shape [B, K, T_s].
+        """
+        if self.model.training:
+            warnings.warn(
+                "Up to version 1.0.1, the _prepare_tokens_and_attributes was evaluated with `torch.no_grad()`. "
+                "This is inconsistent with how model were trained in the MusicGen paper. We removed the "
+                "`torch.no_grad()` in version 1.1.0. Small changes to the final performance are expected. "
+                "Really sorry about that.")
+        if self._cached_batch_loader is None or self.current_stage != "train":
+            audio, infos = batch
+            audio = audio.to(self.device)
+            audio_tokens = None
+            assert audio.size(0) == len(infos), (
+                f"Mismatch between number of items in audio batch ({audio.size(0)})",
+                f" and in metadata ({len(infos)})"
+            )
+        else:
+            audio = None
+            # In that case the batch will be a tuple coming from the _cached_batch_writer bit below.
+            infos, = batch  # type: ignore
+            assert all([isinstance(info, AudioInfo) for info in infos])
+            assert all([info.audio_tokens is not None for info in infos])  # type: ignore
+            audio_tokens = torch.stack([info.audio_tokens for info in infos]).to(self.device)  # type: ignore
+            audio_tokens = audio_tokens.long()
+            for info in infos:
+                if isinstance(info, MusicInfo):
+                    # Careful here, if you want to use this condition_wav (e.b. chroma conditioning),
+                    # then you must be using the chroma cache! otherwise the code will try
+                    # to use this segment and fail (by that I mean you will see NaN everywhere).
+                    info.self_wav = WavCondition(
+                        torch.full([1, info.channels, info.total_frames], float('NaN')),
+                        length=torch.tensor([info.n_frames]),
+                        sample_rate=[info.sample_rate],
+                        path=[info.meta.path],
+                        seek_time=[info.seek_time])
+                    dataset = get_dataset_from_loader(self.dataloaders['original_train'])
+                    assert isinstance(dataset, MusicDataset), type(dataset)
+                    if dataset.paraphraser is not None and info.description is not None:
+                        # Hackingly reapplying paraphraser when using cache.
+                        info.description = dataset.paraphraser.sample_paraphrase(
+                            info.meta.path, info.description)
+        # prepare attributes
+        attributes = [info.to_condition_attributes() for info in infos]
+        attributes = self.model.cfg_dropout(attributes)
+        attributes = self.model.att_dropout(attributes)
+        tokenized = self.model.condition_provider.tokenize(attributes)
+
+        # Now we should be synchronization free.
+        if self.device == "cuda" and check_synchronization_points:
+            torch.cuda.set_sync_debug_mode("warn")
+        #import ipdb;ipdb.set_trace()
+        if audio_tokens is None:
+            with torch.no_grad():
+                #getting just the necessary stems here
+                audio = self._get_stemmed_wav(audio)
+                audio_tokens, scale = self.compression_model.encode(audio)
+                assert scale is None, "Scaled compression model not supported with LM."
+
+        with self.autocast:
+            condition_tensors = self.model.condition_provider(tokenized)
+
+        # create a padding mask to hold valid vs invalid positions
+        padding_mask = torch.ones_like(audio_tokens, dtype=torch.bool, device=audio_tokens.device)
+        # replace encodec tokens from padded audio with special_token_id
+        if self.cfg.tokens.padding_with_special_token:
+            audio_tokens = audio_tokens.clone()
+            padding_mask = padding_mask.clone()
+            token_sample_rate = self.compression_model.frame_rate
+            B, K, T_s = audio_tokens.shape
+            for i in range(B):
+                n_samples = infos[i].n_frames
+                audio_sample_rate = infos[i].sample_rate
+                # take the last token generated from actual audio frames (non-padded audio)
+                valid_tokens = math.floor(float(n_samples) / audio_sample_rate * token_sample_rate)
+                audio_tokens[i, :, valid_tokens:] = self.model.special_token_id
+                padding_mask[i, :, valid_tokens:] = 0
+
+        if self.device == "cuda" and check_synchronization_points:
+            torch.cuda.set_sync_debug_mode("default")
+
+        if self._cached_batch_writer is not None and self.current_stage == 'train':
+            assert self._cached_batch_loader is None
+            assert audio_tokens is not None
+            for info, one_audio_tokens in zip(infos, audio_tokens):
+                assert isinstance(info, AudioInfo)
+                if isinstance(info, MusicInfo):
+                    assert not info.joint_embed, "joint_embed and cache not supported yet."
+                    info.self_wav = None
+                assert one_audio_tokens.max() < 2**15, one_audio_tokens.max().item()
+                info.audio_tokens = one_audio_tokens.short().cpu()
+            self._cached_batch_writer.save(infos)
+
+        return condition_tensors, audio_tokens, padding_mask
+
+
+    @torch.no_grad()
+    def _get_stemmed_wav(self, wav: torch.Tensor) -> torch.Tensor:
+        """Get parts of the wav that holds the melody, extracting the main stems from the wav."""
+        from demucs.apply import apply_model
+        from demucs.audio import convert_audio
+        #with self.autocast:
+        wav = convert_audio(
+            wav,32000, self.demucs.samplerate, self.demucs.audio_channels)  # type: ignore
+        stems = apply_model(self.demucs, wav, device=self.device)
+        stems = stems[:, self.stem_indices]  # extract relevant stems for melody conditioning
+        mix_wav = stems.sum(1)  # merge extracted stems to single waveform
+        mix_wav = convert_audio(mix_wav, self.demucs.samplerate, 32000, 1)  # type: ignore
+        return mix_wav
