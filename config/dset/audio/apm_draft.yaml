@@ -1,0 +1,10 @@
+# @package __global__
+
+datasource:
+  max_sample_rate: 32000
+  max_channels: 2
+
+  train: egs/apm_fulltracks/train
+  valid: egs/apm_fulltracks/val
+  evaluate: egs/apm_fulltracks/test
+  generate: egs/apm_fulltracks/test
