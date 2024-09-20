@@ -327,6 +327,8 @@ class LMModel(StreamingModule):
                            temp: float = 1.0,
                            top_k: int = 0,
                            top_p: float = 0.0,
+                           mirostat_tau: tp.Optional[tp.Union[float, tp.List[float]]] = None,
+                           mirostat_eta: tp.Optional[float] = None,
                            cfg_coef: tp.Optional[float] = None,
                            two_step_cfg: tp.Optional[bool] = None) -> torch.Tensor:
         """Sample next token from the model given a sequence and a set of conditions. The model supports
@@ -381,7 +383,46 @@ class LMModel(StreamingModule):
         # Apply softmax for sampling if temp > 0. Else, do greedy sampling to avoid zero division error.
         if use_sampling and temp > 0.0:
             probs = torch.softmax(logits / temp, dim=-1)
-            if top_p > 0.0:
+
+            if mirostat_tau:
+                #mirostat starts here
+                fill_mask = -torch.log2(probs) > self.mu
+                #there must be at least one token to sample from
+                max_indices = probs.argmax(-1).unsqueeze(-1)
+                fill_mask.scatter_(-1, max_indices, False)
+
+                probs.masked_fill_(fill_mask, 0.)
+                mean_top_p  = probs.sum(2).mean(0)
+                probs/= probs.sum(-1, keepdims=True)
+                next_token = utils.multinomial(probs,   num_samples=1)
+                observed_probabilities = probs.gather(2, next_token)
+                observed_surprise = -torch.log2(observed_probabilities)
+
+                error = observed_surprise - torch.tensor([[[tau] for tau in mirostat_tau]] * B, device=self.mu.device)
+                self.mu -= mirostat_eta * error
+                assert not self.mu.isnan().any()
+                mean_top_k = fill_mask.shape[-1] - fill_mask.sum(2).float().mean(0)
+                mean_observed_probablities = observed_probabilities.mean(0)
+                mean_observed_surprise = observed_surprise.mean(0)
+                for i in range(len(mean_top_k)):
+                    self.writer.add_scalar(tag=f'top_k_i_{i}',
+                                           scalar_value=mean_top_k[i].item(),
+                                           global_step=self.step)
+                    self.writer.add_scalar(tag=f'top_p_i_{i}',
+                                           scalar_value=mean_top_p[i].item(),
+                                           global_step=self.step)
+                    self.writer.add_scalar(tag=f'observed_probabilities_{i}',
+                                           scalar_value=mean_observed_probablities[i].item(),
+                                           global_step=self.step)
+                    self.writer.add_scalar(tag=f'observed_surprise_{i}',
+                                           scalar_value=mean_observed_surprise[i].item(),
+                                           global_step=self.step)
+
+                self.writer.add_scalar(tag='mu_mean', scalar_value=self.mu.mean().item(), global_step=self.step)
+                self.writer.add_scalar(tag='step', scalar_value=self.step, global_step=self.step)
+                self.step += 1
+
+            elif top_p > 0.0:
                 next_token = utils.sample_top_p(probs, p=top_p)
             elif top_k > 0:
                 next_token = utils.sample_top_k(probs, k=top_k)
@@ -402,6 +443,8 @@ class LMModel(StreamingModule):
                  temp: float = 1.0,
                  top_k: int = 250,
                  top_p: float = 0.0,
+                 mirostat_tau: tp.Optional[float] = None,
+                 mirostat_eta: tp.Optional[float] = None,
                  cfg_coef: tp.Optional[float] = None,
                  two_step_cfg: tp.Optional[bool] = None,
                  remove_prompts: bool = False,
@@ -495,6 +538,20 @@ class LMModel(StreamingModule):
 
         with self.streaming():
             unconditional_state = self.get_streaming_state()
+            if mirostat_tau is not None:
+                print(mirostat_tau)
+                if mirostat_tau is not None:
+                    assert mirostat_eta is not None
+                    if isinstance(mirostat_tau, list):
+                        assert len(
+                            mirostat_tau) == K, "'mirostat_tau' list must have length equal to the number of codebooks (K)"
+                        self.mu = torch.tensor([[[2 * tau] for tau in mirostat_tau]] * B, device=device)
+                    else:
+                        self.mu = 2 * mirostat_tau * torch.ones((B, K, 1), device=device)
+
+                from torch.utils.tensorboard import SummaryWriter
+                self.writer = SummaryWriter()
+                self.step=0
             prev_offset = 0
             gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [B, K, S]
             for offset in range(start_offset_sequence, gen_sequence_len):
@@ -509,6 +566,7 @@ class LMModel(StreamingModule):
                 # sample next token from the model, next token shape is [B, K, 1]
                 next_token = self._sample_next_token(
                     curr_sequence, cfg_conditions, unconditional_state, use_sampling, temp, top_k, top_p,
+                    mirostat_tau, mirostat_eta,
                     cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
                 # ensure the tokens that should be masked are properly set to special_token_id
                 # as the model never output special_token_id

@@ -91,6 +91,8 @@ class MusicGen(BaseGenModel):
         return MusicGen(name, compression_model, lm)
 
     def set_generation_params(self, use_sampling: bool = True, top_k: int = 250,
+                              mirostat_eta: tp.Optional[float] = None,
+                              mirostat_tau: tp.Optional[float] = None,
                               top_p: float = 0.0, temperature: float = 1.0,
                               duration: float = 30.0, cfg_coef: float = 3.0,
                               two_step_cfg: bool = False, extend_stride: float = 18):
@@ -118,6 +120,8 @@ class MusicGen(BaseGenModel):
             'temp': temperature,
             'top_k': top_k,
             'top_p': top_p,
+            'mirostat_eta': mirostat_eta,
+            'mirostat_tau': mirostat_tau,
             'cfg_coef': cfg_coef,
             'two_step_cfg': two_step_cfg,
         }
