@@ -285,6 +285,7 @@ def on_submit_preference(preference, username, comment, session_state):
         # Load current ratings and update leaderboard
         preset_ratings = load_preset_ratings()
         leaderboard_md = get_preset_leaderboard_markdown(preset_ratings)
+        leaderboard = gr.Markdown(value=leaderboard_md, label="Preset Leaderboard")
         return (
             preset_description1,
             preset_description2,
@@ -294,6 +295,7 @@ def on_submit_preference(preference, username, comment, session_state):
             disable_comment,
             disable_submit,
             session_state,
+            leaderboard
         )
     else:
         # Record the user's choice along with optional fields
@@ -320,6 +322,7 @@ def on_submit_preference(preference, username, comment, session_state):
         # Load current ratings and update leaderboard
         preset_ratings = load_preset_ratings()
         leaderboard_md = get_preset_leaderboard_markdown(preset_ratings)
+        leaderboard = gr.Markdown(value=leaderboard_md, label="Preset Leaderboard")
 
         return (
             preset_description1,
@@ -329,7 +332,8 @@ def on_submit_preference(preference, username, comment, session_state):
             disable_username,
             disable_comment,
             disable_submit,
-            session_state
+            session_state,
+            leaderboard
         )
 
 def record_user_choice(preference, preset1, preset2, text_prompt, duration, username, comment):
@@ -409,6 +413,7 @@ def ui_full(launch_kwargs):
         # Define the leaderboard component
         leaderboard_md = get_preset_leaderboard_markdown(load_preset_ratings())
         leaderboard = gr.Markdown(value=leaderboard_md, label="Preset Leaderboard")
+
 
 
         submit.click(
