@@ -166,8 +166,17 @@ def predict_full(text, duration, session_state, progress=gr.Progress()):
         'has_submitted': False  # Initialize submission flag
     })
 
-    # Return the audio outputs, make preference visible, and store session state
-    return wavs1[0], wavs2[0], gr.update(visible=True), session_state
+    # Return the audio outputs, make preference and optional fields visible, and store session state
+    return (
+        wavs1[0],
+        wavs2[0],
+        gr.update(visible=True),  # Show preference Radio
+        gr.update(visible=True),  # Show Username Textbox
+        gr.update(visible=True),  # Show Comment Textbox
+        gr.update(visible=True),  # Show Submit Preference Button
+        gr.update(visible=False),  # Hide Confirmation Message
+        session_state
+    )
 
 
 # Updated the preference options to include 'Tie' and 'Both are bad'
@@ -183,30 +192,34 @@ generation_presets = [
 ]
 
 
-def on_preference_selected(preference, session_state):
+def on_submit_preference(preference, username, comment, session_state):
     # Check if the user has already submitted their preference for this generation
     if session_state.get('has_submitted', False):
         # Inform the user that they've already submitted
-        confirmation = gr.Markdown("**You have already submitted your preference. Thank you!**", visible=True)
+        confirmation = gr.Markdown("**You have already submitted your preference for this generation. Thank you!**", visible=True)
         # Keep the preset information visible
         preset_description1 = session_state['preset1']['name']
         preset_description2 = session_state['preset2']['name']
-        # Disable the preference radio to prevent multiple submissions
+        # Disable the preference radio, username, comment fields, and submit button
         disable_preference = gr.update(visible=False)
-        # Do not disable the submit button
-        no_change_submit = gr.update()  # No change to submit button
+        disable_username = gr.update(visible=False)
+        disable_comment = gr.update(visible=False)
+        disable_submit = gr.update(visible=False)
         return (
             preset_description1,
             preset_description2,
             confirmation,
             disable_preference,
-            no_change_submit,
+            disable_username,
+            disable_comment,
+            disable_submit,
             session_state  # Return the unchanged session_state
         )
     else:
-        # Record the user's choice
+        # Record the user's choice along with optional fields
         record_user_choice(preference, session_state['preset1'], session_state['preset2'],
-                          session_state['text'], session_state['duration'])
+                          session_state['text'], session_state['duration'],
+                          username, comment)
         # Set the submission flag to True
         session_state['has_submitted'] = True
 
@@ -214,25 +227,28 @@ def on_preference_selected(preference, session_state):
         preset_description1 = session_state['preset1']['name']
         preset_description2 = session_state['preset2']['name']
 
-        # Optionally, you can display a thank you message or confirmation
+        # Display a thank you message or confirmation
         confirmation = gr.Markdown("**Thank you for your feedback!**", visible=True)
 
-        # Disable the preference radio to prevent multiple submissions
+        # Disable the preference radio, username, comment fields, and submit button to prevent multiple submissions
         disable_preference = gr.update(visible=False)
-        # Do not disable the submit button
-        no_change_submit = gr.update()  # No change to submit button
+        disable_username = gr.update(visible=False)
+        disable_comment = gr.update(visible=False)
+        disable_submit = gr.update(visible=False)
 
         return (
             preset_description1,
             preset_description2,
             confirmation,
             disable_preference,
-            no_change_submit,
+            disable_username,
+            disable_comment,
+            disable_submit,
             session_state  # Return the updated session_state
         )
 
 
-def record_user_choice(preference, preset1, preset2, text_prompt, duration):
+def record_user_choice(preference, preset1, preset2, text_prompt, duration, username, comment):
     data = {
         'timestamp': datetime.now().isoformat(),
         'preference': preference,
@@ -242,6 +258,8 @@ def record_user_choice(preference, preset1, preset2, text_prompt, duration):
         'preset1_params': {k: v for k, v in preset1.items() if k != 'name'},
         'preset2_name': preset2['name'],
         'preset2_params': {k: v for k, v in preset2.items() if k != 'name'},
+        'username': username if username.strip() else None,
+        'comment': comment if comment.strip() else None
     }
 
     # Define the CSV file path
@@ -255,7 +273,8 @@ def record_user_choice(preference, preset1, preset2, text_prompt, duration):
         fieldnames = [
             'timestamp', 'preference', 'text_prompt', 'duration',
             'preset1_name', 'preset1_params',
-            'preset2_name', 'preset2_params'
+            'preset2_name', 'preset2_params',
+            'username', 'comment'
         ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
@@ -288,14 +307,23 @@ def ui_full(launch_kwargs):
                 audio_output2 = gr.Audio(label="Generated Music 2", type='filepath')
                 preference = gr.Radio(choices=preference_options,
                                       label="Which track do you prefer?", visible=False)
+                username = gr.Textbox(label="Username (optional)", placeholder="Enter your username...", visible=False)
+                comment = gr.Textbox(label="Comment (optional)", lines=3, placeholder="Leave your comments here...", visible=False)
+                submit_preference = gr.Button("Submit Preference", visible=False)
                 preset_info1 = gr.Markdown(label="Preset Used for Track 1", visible=False)
                 preset_info2 = gr.Markdown(label="Preset Used for Track 2", visible=False)
                 confirmation = gr.Markdown("", visible=False)  # For confirmation messages
                 session_state = gr.State({})  # Initialize as an empty dict
-        submit.click(predict_full, inputs=[text, duration, session_state],
-                     outputs=[audio_output1, audio_output2, preference, session_state])
-        preference.change(on_preference_selected, inputs=[preference, session_state],
-                          outputs=[preset_info1, preset_info2, confirmation, preference, submit, session_state])
+        submit.click(
+            predict_full,
+            inputs=[text, duration, session_state],
+            outputs=[audio_output1, audio_output2, preference, username, comment, submit_preference, confirmation, session_state]
+        )
+        submit_preference.click(
+            on_submit_preference,
+            inputs=[preference, username, comment, session_state],
+            outputs=[preset_info1, preset_info2, confirmation, preference, username, comment, submit_preference, session_state]
+        )
         gr.Examples(
             fn=predict_full,
             examples=[
@@ -325,7 +353,7 @@ def ui_full(launch_kwargs):
                 ],
             ],
             inputs=[text, duration, session_state],
-            outputs=[audio_output1, audio_output2, preference, session_state],
+            outputs=[audio_output1, audio_output2, preference, username, comment, submit_preference, confirmation, session_state],
             cache_examples=False  # Disable caching for dynamic outputs
         )
 
