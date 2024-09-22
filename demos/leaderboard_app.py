@@ -85,7 +85,7 @@ file_cleaner = FileCleaner()
 
 def load_model():
     global MODEL
-    model_version = 'facebook/musicgen-small'  # Fixed model
+    model_version = 'facebook/musicgen-medium'  # Fixed model
     print("Loading model", model_version)
     if MODEL is None or MODEL.name != model_version:
         # Clear PyTorch CUDA cache and delete model
