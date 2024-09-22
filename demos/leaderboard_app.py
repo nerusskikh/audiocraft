@@ -27,8 +27,13 @@ SPACE_ID = os.environ.get('SPACE_ID', '')
 IS_BATCHED = False  # Since we're running locally and not using batched mode
 INTERRUPTING = False
 
+# Define the directory to save generated tracks
+GENERATED_TRACKS_DIR = Path("generated_tracks")
+GENERATED_TRACKS_DIR.mkdir(exist_ok=True)
+
 # We have to wrap subprocess call to clean a bit the log when using gr.make_waveform
 _old_call = sp.call
+
 
 def _call_nostderr(*args, **kwargs):
     # Avoid ffmpeg logging
@@ -36,23 +41,32 @@ def _call_nostderr(*args, **kwargs):
     kwargs['stdout'] = sp.DEVNULL
     _old_call(*args, **kwargs)
 
+
 sp.call = _call_nostderr
+
 # Preallocating the pool of processes.
 pool = ProcessPoolExecutor(4)
 pool.__enter__()
+
 
 def interrupt():
     global INTERRUPTING
     INTERRUPTING = True
 
+
 class FileCleaner:
     def __init__(self, file_lifetime: float = 3600):
         self.file_lifetime = file_lifetime
         self.files = []
+        self.excluded_dirs = {GENERATED_TRACKS_DIR.resolve()}  # Exclude generated_tracks_dir
 
     def add(self, path: tp.Union[str, Path]):
         self._cleanup()
-        self.files.append((time.time(), Path(path)))
+        resolved_path = Path(path).resolve()
+        if resolved_path.parent in self.excluded_dirs:
+            # Do not add files from excluded directories
+            return
+        self.files.append((time.time(), resolved_path))
 
     def _cleanup(self):
         now = time.time()
@@ -64,7 +78,9 @@ class FileCleaner:
             else:
                 break
 
+
 file_cleaner = FileCleaner()
+
 
 def load_model():
     global MODEL
@@ -72,10 +88,12 @@ def load_model():
     print("Loading model", model_version)
     if MODEL is None or MODEL.name != model_version:
         # Clear PyTorch CUDA cache and delete model
-        del MODEL
+        if MODEL is not None:
+            del MODEL
         torch.cuda.empty_cache()
         MODEL = None  # in case loading would crash
         MODEL = MusicGen.get_pretrained(model_version, device='cuda' if torch.cuda.is_available() else 'cpu')
+
 
 def _do_predictions(texts, duration, progress=False, gradio_progress=None, **gen_kwargs):
     MODEL.set_generation_params(duration=duration, **gen_kwargs)
@@ -100,7 +118,8 @@ def _do_predictions(texts, duration, progress=False, gradio_progress=None, **gen
     print("Tempfiles currently stored: ", len(file_cleaner.files))
     return out_wavs
 
-def predict_full(text, duration, progress=gr.Progress()):
+
+def predict_full(text, duration, session_state, progress=gr.Progress()):
     global INTERRUPTING
     INTERRUPTING = False
     progress(0, desc="Loading model...")
@@ -139,15 +158,17 @@ def predict_full(text, duration, progress=gr.Progress()):
         gradio_progress=progress, **preset2_params)
 
     # Store the presets and text prompt for later use
-    session_state = {
+    session_state.update({
         'preset1': preset1,
         'preset2': preset2,
         'text': text,
-        'duration': duration
-    }
+        'duration': duration,
+        'has_submitted': False  # Initialize submission flag
+    })
 
     # Return the audio outputs, make preference visible, and store session state
     return wavs1[0], wavs2[0], gr.update(visible=True), session_state
+
 
 # Updated the preference options to include 'Tie' and 'Both are bad'
 preference_options = ["Generated Music 1", "Generated Music 2", "Tie", "Both are bad"]
@@ -161,21 +182,55 @@ generation_presets = [
     # Add more presets as needed
 ]
 
+
 def on_preference_selected(preference, session_state):
-    # Update preset info components to be visible and display the preset descriptions
-    preset1 = session_state['preset1']
-    preset2 = session_state['preset2']
-    text_prompt = session_state['text']
-    duration = session_state['duration']
+    # Check if the user has already submitted their preference for this generation
+    if session_state.get('has_submitted', False):
+        # Inform the user that they've already submitted
+        confirmation = gr.Markdown("**You have already submitted your preference. Thank you!**", visible=True)
+        # Keep the preset information visible
+        preset_description1 = session_state['preset1']['name']
+        preset_description2 = session_state['preset2']['name']
+        # Disable the preference radio to prevent multiple submissions
+        disable_preference = gr.update(visible=False)
+        # Do not disable the submit button
+        no_change_submit = gr.update()  # No change to submit button
+        return (
+            preset_description1,
+            preset_description2,
+            confirmation,
+            disable_preference,
+            no_change_submit,
+            session_state  # Return the unchanged session_state
+        )
+    else:
+        # Record the user's choice
+        record_user_choice(preference, session_state['preset1'], session_state['preset2'],
+                          session_state['text'], session_state['duration'])
+        # Set the submission flag to True
+        session_state['has_submitted'] = True
 
-    # Record the user's choice in a CSV file
-    record_user_choice(preference, preset1, preset2, text_prompt, duration)
+        # Display preset information
+        preset_description1 = session_state['preset1']['name']
+        preset_description2 = session_state['preset2']['name']
 
-    preset_description1 = preset1['name']
-    preset_description2 = preset2['name']
+        # Optionally, you can display a thank you message or confirmation
+        confirmation = gr.Markdown("**Thank you for your feedback!**", visible=True)
 
-    return (gr.update(value=preset_description1, visible=True),
-            gr.update(value=preset_description2, visible=True))
+        # Disable the preference radio to prevent multiple submissions
+        disable_preference = gr.update(visible=False)
+        # Do not disable the submit button
+        no_change_submit = gr.update()  # No change to submit button
+
+        return (
+            preset_description1,
+            preset_description2,
+            confirmation,
+            disable_preference,
+            no_change_submit,
+            session_state  # Return the updated session_state
+        )
+
 
 def record_user_choice(preference, preset1, preset2, text_prompt, duration):
     data = {
@@ -196,7 +251,7 @@ def record_user_choice(preference, preset1, preset2, text_prompt, duration):
     file_exists = os.path.isfile(csv_file)
 
     # Write to the CSV file
-    with open(csv_file, mode='a', newline='') as csvfile:
+    with open(csv_file, mode='a', newline='', encoding='utf-8') as csvfile:
         fieldnames = [
             'timestamp', 'preference', 'text_prompt', 'duration',
             'preset1_name', 'preset1_params',
@@ -209,6 +264,7 @@ def record_user_choice(preference, preset1, preset2, text_prompt, duration):
             writer.writeheader()
 
         writer.writerow(data)
+
 
 def ui_full(launch_kwargs):
     with gr.Blocks() as interface:
@@ -224,9 +280,9 @@ def ui_full(launch_kwargs):
         with gr.Row():
             with gr.Column():
                 text = gr.Text(label="Input Text", interactive=True)
-                duration = gr.Slider(minimum=1, maximum=30, value=10, label="Duration", interactive=True)
+                duration = gr.Slider(minimum=1, maximum=30, value=10, label="Duration (seconds)", interactive=True)
                 submit = gr.Button("Generate")
-                _ = gr.Button("Interrupt").click(fn=interrupt, queue=False)
+                interrupt_btn = gr.Button("Interrupt").click(fn=interrupt, queue=False)
             with gr.Column():
                 audio_output1 = gr.Audio(label="Generated Music 1", type='filepath')
                 audio_output2 = gr.Audio(label="Generated Music 2", type='filepath')
@@ -234,11 +290,12 @@ def ui_full(launch_kwargs):
                                       label="Which track do you prefer?", visible=False)
                 preset_info1 = gr.Markdown(label="Preset Used for Track 1", visible=False)
                 preset_info2 = gr.Markdown(label="Preset Used for Track 2", visible=False)
-                session_state = gr.State()
-        submit.click(predict_full, inputs=[text, duration],
+                confirmation = gr.Markdown("", visible=False)  # For confirmation messages
+                session_state = gr.State({})  # Initialize as an empty dict
+        submit.click(predict_full, inputs=[text, duration, session_state],
                      outputs=[audio_output1, audio_output2, preference, session_state])
         preference.change(on_preference_selected, inputs=[preference, session_state],
-                          outputs=[preset_info1, preset_info2])
+                          outputs=[preset_info1, preset_info2, confirmation, preference, submit, session_state])
         gr.Examples(
             fn=predict_full,
             examples=[
@@ -267,10 +324,11 @@ def ui_full(launch_kwargs):
                     10
                 ],
             ],
-            inputs=[text, duration],
+            inputs=[text, duration, session_state],
             outputs=[audio_output1, audio_output2, preference, session_state],
             cache_examples=False  # Disable caching for dynamic outputs
         )
+
         gr.Markdown(
             """
             ### More details
@@ -284,7 +342,8 @@ def ui_full(launch_kwargs):
             """
         )
 
-        interface.queue().launch(**launch_kwargs)
+    interface.queue().launch(**launch_kwargs)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
