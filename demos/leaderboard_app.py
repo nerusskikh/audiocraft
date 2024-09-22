@@ -9,15 +9,14 @@ from tempfile import NamedTemporaryFile
 import time
 import typing as tp
 import warnings
-import random
 import csv
-import json  # Added for storing preset ratings
+import json  # For JSON operations
+import numpy as np  # For numerical operations
 from datetime import datetime
 
 from einops import rearrange
 import torch
 import gradio as gr
-import numpy as np  # Added for numerical computations
 
 from audiocraft.data.audio_utils import convert_audio
 from audiocraft.data.audio import audio_write
@@ -86,7 +85,7 @@ file_cleaner = FileCleaner()
 
 def load_model():
     global MODEL
-    model_version = 'facebook/musicgen-medium'  # Fixed model
+    model_version = 'facebook/musicgen-small'  # Fixed model
     print("Loading model", model_version)
     if MODEL is None or MODEL.name != model_version:
         # Clear PyTorch CUDA cache and delete model
@@ -124,14 +123,16 @@ def _do_predictions(texts, duration, progress=False, gradio_progress=None, **gen
 # Updated the preference options to include 'Tie' and 'Both are bad'
 preference_options = ["Generated Music 1", "Generated Music 2", "Tie", "Both are bad"]
 
-# Added a list of generation parameter presets
-generation_presets = [
-    {'name': 'Preset 1', 'mirostat_eta': 0.1, 'mirostat_tau': [2.2, 2.7, 2.7, 2.7], 'temperature': 1.9, 'cfg_coef': 3.0},
-    {'name': 'Preset 2', 'mirostat_eta': 0.1, 'mirostat_tau': [2.4, 2.7, 2.7, 2.7], 'temperature': 1.1, 'cfg_coef': 3.0},
-    {'name': 'Preset 3', 'mirostat_eta': 0.1, 'mirostat_tau': [3.8, 2.7, 2.7, 2.7], 'temperature': 1.2, 'cfg_coef': 3.0},
-    {'name': 'Preset 4', 'mirostat_eta': 0.1, 'mirostat_tau': [1.2, 1.8, 1.8, 1.8], 'temperature': 1.1, 'cfg_coef': 3.0}
-    # Add more presets as needed
-]
+# Load presets from file
+def load_presets(filename='presets.json'):
+    if os.path.isfile(filename):
+        with open(filename, 'r') as f:
+            presets = json.load(f)
+        return presets
+    else:
+        raise FileNotFoundError(f"Presets file '{filename}' not found.")
+
+generation_presets = load_presets()
 
 # Initialize or load ELO ratings
 def load_preset_ratings(filename='preset_ratings.json'):
@@ -189,6 +190,16 @@ def select_presets_with_probabilities(sampling_weights, num_presets=2):
     # Retrieve the actual preset dictionaries
     selected_presets = [next(preset for preset in generation_presets if preset['name'] == name) for name in selected_names]
     return selected_presets
+
+def get_preset_leaderboard_markdown(preset_ratings):
+    # Sort presets by rating in descending order
+    sorted_presets = sorted(preset_ratings.items(), key=lambda x: x[1], reverse=True)
+    markdown = "### Preset Leaderboard\n\n"
+    markdown += "| Rank | Preset Name | ELO Rating |\n"
+    markdown += "|------|-------------|------------|\n"
+    for idx, (preset_name, rating) in enumerate(sorted_presets, start=1):
+        markdown += f"| {idx} | {preset_name} | {rating:.2f} |\n"
+    return markdown
 
 def predict_full(text, duration, session_state, progress=gr.Progress()):
     global INTERRUPTING
@@ -271,6 +282,9 @@ def on_submit_preference(preference, username, comment, session_state):
         disable_username = gr.update(visible=False)
         disable_comment = gr.update(visible=False)
         disable_submit = gr.update(visible=False)
+        # Load current ratings and update leaderboard
+        preset_ratings = load_preset_ratings()
+        leaderboard_md = get_preset_leaderboard_markdown(preset_ratings)
         return (
             preset_description1,
             preset_description2,
@@ -279,7 +293,7 @@ def on_submit_preference(preference, username, comment, session_state):
             disable_username,
             disable_comment,
             disable_submit,
-            session_state  # Return the unchanged session_state
+            session_state,
         )
     else:
         # Record the user's choice along with optional fields
@@ -303,6 +317,10 @@ def on_submit_preference(preference, username, comment, session_state):
         disable_comment = gr.update(visible=False)
         disable_submit = gr.update(visible=False)
 
+        # Load current ratings and update leaderboard
+        preset_ratings = load_preset_ratings()
+        leaderboard_md = get_preset_leaderboard_markdown(preset_ratings)
+
         return (
             preset_description1,
             preset_description2,
@@ -311,7 +329,7 @@ def on_submit_preference(preference, username, comment, session_state):
             disable_username,
             disable_comment,
             disable_submit,
-            session_state  # Return the updated session_state
+            session_state
         )
 
 def record_user_choice(preference, preset1, preset2, text_prompt, duration, username, comment):
@@ -388,6 +406,11 @@ def ui_full(launch_kwargs):
                 preset_info2 = gr.Markdown(label="Preset Used for Track 2", visible=False)
                 confirmation = gr.Markdown("", visible=False)  # For confirmation messages
                 session_state = gr.State({})  # Initialize as an empty dict
+        # Define the leaderboard component
+        leaderboard_md = get_preset_leaderboard_markdown(load_preset_ratings())
+        leaderboard = gr.Markdown(value=leaderboard_md, label="Preset Leaderboard")
+
+
         submit.click(
             predict_full,
             inputs=[text, duration, session_state],
@@ -413,9 +436,11 @@ def ui_full(launch_kwargs):
                 username,
                 comment,
                 submit_preference,
-                session_state
+                session_state,
+                leaderboard
             ]
         )
+
         gr.Examples(
             fn=predict_full,
             examples=[
