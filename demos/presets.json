@@ -1,0 +1,62 @@
+[
+    {
+        "name": "Diversity 1.0",
+        "mirostat_eta": 0.1,
+        "mirostat_tau": [2.2, 2.7, 2.7, 2.7],
+        "temperature": 1.9,
+        "cfg_coef": 3.0
+    },
+    {
+        "name": "Presentation: normie",
+        "mirostat_eta": 0.1,
+        "mirostat_tau": [2.4, 2.7, 2.7, 2.7],
+        "temperature": 1.1,
+        "cfg_coef": 3.0
+    },
+    {
+        "name": "Presentation: high surprise",
+        "mirostat_eta": 0.1,
+        "mirostat_tau": [3.8, 2.7, 2.7, 2.7],
+        "temperature": 1.2,
+        "cfg_coef": 3.0
+    },
+    {
+        "name": "High surprise lowered eta",
+        "mirostat_eta": 0.05,
+        "mirostat_tau": [3.8, 2.7, 2.7, 2.7],
+        "temperature": 1.2,
+        "cfg_coef": 3.0
+    },
+    {
+        "name": "High surprise higher eta",
+        "mirostat_eta": 0.15,
+        "mirostat_tau": [3.8, 2.7, 2.7, 2.7],
+        "temperature": 1.2,
+        "cfg_coef": 3.0
+    },
+    {
+        "name": "top_p draft",
+        "top_p": 0.2,
+        "temperature": 1.2,
+        "cfg_coef": 3.0
+    },
+    {
+        "name": "top_p draft 2",
+        "top_p": 0.6,
+        "temperature": 1,
+        "cfg_coef": 3.0
+    },
+    {
+        "name": "top_k draft",
+        "top_k": 200,
+        "temperature": 1,
+        "cfg_coef": 3.0
+    },
+    {
+        "name": "Presentation: low surprise",
+        "mirostat_eta": 0.1,
+        "mirostat_tau": [1.2, 1.8, 1.8, 1.8],
+        "temperature": 1.1,
+        "cfg_coef": 3.0
+    }
+]
