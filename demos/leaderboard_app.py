@@ -163,7 +163,8 @@ def predict_full(text, duration, session_state, progress=gr.Progress()):
         'preset2': preset2,
         'text': text,
         'duration': duration,
-        'has_submitted': False  # Initialize submission flag
+        'has_submitted': False,  # Initialize submission flag
+        'selected_preference': None  # Initialize selected preference
     })
 
     # Return the audio outputs, make preference and optional fields visible, and store session state
@@ -195,8 +196,10 @@ generation_presets = [
 def on_submit_preference(preference, username, comment, session_state):
     # Check if the user has already submitted their preference for this generation
     if session_state.get('has_submitted', False):
-        # Inform the user that they've already submitted
-        confirmation = gr.Markdown("**You have already submitted your preference for this generation. Thank you!**", visible=True)
+        # Retrieve the previously selected preference
+        selected_preference = session_state.get('selected_preference', 'No preference recorded.')
+        # Inform the user that they've already submitted along with their selection
+        confirmation = gr.Markdown(f"**You have already submitted your preference for this generation: {selected_preference}. Thank you!**", visible=True)
         # Keep the preset information visible
         preset_description1 = session_state['preset1']['name']
         preset_description2 = session_state['preset2']['name']
@@ -220,15 +223,16 @@ def on_submit_preference(preference, username, comment, session_state):
         record_user_choice(preference, session_state['preset1'], session_state['preset2'],
                           session_state['text'], session_state['duration'],
                           username, comment)
-        # Set the submission flag to True
+        # Set the submission flag to True and store the selected preference
         session_state['has_submitted'] = True
+        session_state['selected_preference'] = preference
 
         # Display preset information
         preset_description1 = session_state['preset1']['name']
         preset_description2 = session_state['preset2']['name']
 
-        # Display a thank you message or confirmation
-        confirmation = gr.Markdown("**Thank you for your feedback!**", visible=True)
+        # Display a thank you message or confirmation including the selected preference
+        confirmation = gr.Markdown(f"**Thank you for your feedback! The first preset: {preset_description1}. The second preset: {preset_description2}. **", visible=True)
 
         # Disable the preference radio, username, comment fields, and submit button to prevent multiple submissions
         disable_preference = gr.update(visible=False)
@@ -317,12 +321,30 @@ def ui_full(launch_kwargs):
         submit.click(
             predict_full,
             inputs=[text, duration, session_state],
-            outputs=[audio_output1, audio_output2, preference, username, comment, submit_preference, confirmation, session_state]
+            outputs=[
+                audio_output1,
+                audio_output2,
+                preference,
+                username,
+                comment,
+                submit_preference,
+                confirmation,
+                session_state
+            ]
         )
         submit_preference.click(
             on_submit_preference,
             inputs=[preference, username, comment, session_state],
-            outputs=[preset_info1, preset_info2, confirmation, preference, username, comment, submit_preference, session_state]
+            outputs=[
+                preset_info1,
+                preset_info2,
+                confirmation,
+                preference,
+                username,
+                comment,
+                submit_preference,
+                session_state
+            ]
         )
         gr.Examples(
             fn=predict_full,
@@ -353,7 +375,16 @@ def ui_full(launch_kwargs):
                 ],
             ],
             inputs=[text, duration, session_state],
-            outputs=[audio_output1, audio_output2, preference, username, comment, submit_preference, confirmation, session_state],
+            outputs=[
+                audio_output1,
+                audio_output2,
+                preference,
+                username,
+                comment,
+                submit_preference,
+                confirmation,
+                session_state
+            ],
             cache_examples=False  # Disable caching for dynamic outputs
         )
 
