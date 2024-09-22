@@ -11,11 +11,13 @@ import typing as tp
 import warnings
 import random
 import csv
+import json  # Added for storing preset ratings
 from datetime import datetime
 
 from einops import rearrange
 import torch
 import gradio as gr
+import numpy as np  # Added for numerical computations
 
 from audiocraft.data.audio_utils import convert_audio
 from audiocraft.data.audio import audio_write
@@ -119,6 +121,75 @@ def _do_predictions(texts, duration, progress=False, gradio_progress=None, **gen
     return out_wavs
 
 
+# Updated the preference options to include 'Tie' and 'Both are bad'
+preference_options = ["Generated Music 1", "Generated Music 2", "Tie", "Both are bad"]
+
+# Added a list of generation parameter presets
+generation_presets = [
+    {'name': 'Preset 1', 'mirostat_eta': 0.1, 'mirostat_tau': [2.2, 2.7, 2.7, 2.7], 'temperature': 1.9, 'cfg_coef': 3.0},
+    {'name': 'Preset 2', 'mirostat_eta': 0.1, 'mirostat_tau': [2.4, 2.7, 2.7, 2.7], 'temperature': 1.1, 'cfg_coef': 3.0},
+    {'name': 'Preset 3', 'mirostat_eta': 0.1, 'mirostat_tau': [3.8, 2.7, 2.7, 2.7], 'temperature': 1.2, 'cfg_coef': 3.0},
+    {'name': 'Preset 4', 'mirostat_eta': 0.1, 'mirostat_tau': [1.2, 1.8, 1.8, 1.8], 'temperature': 1.1, 'cfg_coef': 3.0}
+    # Add more presets as needed
+]
+
+# Initialize or load ELO ratings
+def load_preset_ratings(filename='preset_ratings.json'):
+    if os.path.isfile(filename):
+        with open(filename, 'r') as f:
+            return json.load(f)
+    else:
+        # Initialize all presets with a rating of 1500
+        return {preset['name']: 1500 for preset in generation_presets}
+
+def save_preset_ratings(preset_ratings, filename='preset_ratings.json'):
+    with open(filename, 'w') as f:
+        json.dump(preset_ratings, f)
+
+def update_elo_ratings(preset1_name, preset2_name, preference, preset_ratings, K=32):
+    R1 = preset_ratings[preset1_name]
+    R2 = preset_ratings[preset2_name]
+
+    # Calculate expected scores
+    E1 = 1 / (1 + 10 ** ((R2 - R1) / 400))
+    E2 = 1 / (1 + 10 ** ((R1 - R2) / 400))
+
+    # Assign actual scores based on user preference
+    if preference == "Generated Music 1":
+        S1, S2 = 1, 0
+    elif preference == "Generated Music 2":
+        S1, S2 = 0, 1
+    elif preference == "Tie":
+        S1, S2 = 0.5, 0.5
+    else:  # "Both are bad"
+        S1, S2 = 0, 0
+
+    # Update ratings
+    preset_ratings[preset1_name] = R1 + K * (S1 - E1)
+    preset_ratings[preset2_name] = R2 + K * (S2 - E2)
+
+def compute_sampling_probabilities(preset_ratings, temperature=400):
+    ratings = np.array(list(preset_ratings.values()))
+    names = list(preset_ratings.keys())
+
+    # Apply softmax function
+    exp_ratings = np.exp(ratings / temperature)
+    probabilities = exp_ratings / exp_ratings.sum()
+
+    sampling_weights = dict(zip(names, probabilities))
+    return sampling_weights
+
+def select_presets_with_probabilities(sampling_weights, num_presets=2):
+    preset_names = list(sampling_weights.keys())
+    weights = np.array([sampling_weights[name] for name in preset_names])
+    # Ensure the weights sum to 1
+    weights /= weights.sum()
+    # Randomly select presets without replacement based on weights
+    selected_names = np.random.choice(preset_names, size=num_presets, replace=False, p=weights)
+    # Retrieve the actual preset dictionaries
+    selected_presets = [next(preset for preset in generation_presets if preset['name'] == name) for name in selected_names]
+    return selected_presets
+
 def predict_full(text, duration, session_state, progress=gr.Progress()):
     global INTERRUPTING
     INTERRUPTING = False
@@ -136,8 +207,14 @@ def predict_full(text, duration, session_state, progress=gr.Progress()):
 
     MODEL.set_custom_progress_callback(_progress)
 
-    # Randomly select two distinct presets
-    preset1, preset2 = random.sample(generation_presets, 2)
+    # Load preset ratings
+    preset_ratings = load_preset_ratings()
+
+    # Compute sampling probabilities
+    sampling_weights = compute_sampling_probabilities(preset_ratings)
+
+    # Select two presets based on sampling probabilities
+    preset1, preset2 = select_presets_with_probabilities(sampling_weights, num_presets=2)
 
     # Keep the preset descriptions
     preset_description1 = preset1['name']
@@ -179,20 +256,6 @@ def predict_full(text, duration, session_state, progress=gr.Progress()):
         session_state
     )
 
-
-# Updated the preference options to include 'Tie' and 'Both are bad'
-preference_options = ["Generated Music 1", "Generated Music 2", "Tie", "Both are bad"]
-
-# Added a list of generation parameter presets
-generation_presets = [
-    {'name': 'Preset 1', 'mirostat_eta': 0.1, 'mirostat_tau': [2.2, 2.7, 2.7, 2.7], 'temperature': 1.9, 'cfg_coef': 3.0},
-    {'name': 'Preset 2', 'mirostat_eta': 0.1, 'mirostat_tau': [2.4, 2.7, 2.7, 2.7], 'temperature': 1.1, 'cfg_coef': 3.0},
-    {'name': 'Preset 3', 'mirostat_eta': 0.1, 'mirostat_tau': [3.8, 2.7, 2.7, 2.7], 'temperature': 1.2, 'cfg_coef': 3.0},
-    {'name': 'Preset 4', 'mirostat_eta': 0.1, 'mirostat_tau': [1.2, 1.8, 1.8, 1.8], 'temperature': 1.1, 'cfg_coef': 3.0}
-    # Add more presets as needed
-]
-
-
 def on_submit_preference(preference, username, comment, session_state):
     # Check if the user has already submitted their preference for this generation
     if session_state.get('has_submitted', False):
@@ -232,7 +295,7 @@ def on_submit_preference(preference, username, comment, session_state):
         preset_description2 = session_state['preset2']['name']
 
         # Display a thank you message or confirmation including the selected preference
-        confirmation = gr.Markdown(f"**Thank you for your feedback! The first preset: {preset_description1}. The second preset: {preset_description2}. **", visible=True)
+        confirmation = gr.Markdown(f"**Thank you for your feedback! The first preset: {preset_description1}. The second preset: {preset_description2}.**", visible=True)
 
         # Disable the preference radio, username, comment fields, and submit button to prevent multiple submissions
         disable_preference = gr.update(visible=False)
@@ -250,7 +313,6 @@ def on_submit_preference(preference, username, comment, session_state):
             disable_submit,
             session_state  # Return the updated session_state
         )
-
 
 def record_user_choice(preference, preset1, preset2, text_prompt, duration, username, comment):
     data = {
@@ -288,6 +350,14 @@ def record_user_choice(preference, preset1, preset2, text_prompt, duration, user
 
         writer.writerow(data)
 
+    # Load current ratings
+    preset_ratings = load_preset_ratings()
+
+    # Update ratings
+    update_elo_ratings(preset1['name'], preset2['name'], preference, preset_ratings)
+
+    # Save updated ratings
+    save_preset_ratings(preset_ratings)
 
 def ui_full(launch_kwargs):
     with gr.Blocks() as interface:
@@ -393,7 +463,7 @@ def ui_full(launch_kwargs):
             ### More details
 
             The model will generate two versions of the music based on different generation parameter presets.
-            Two presets are randomly selected from a predefined list, and you can listen to both tracks and select which one you prefer.
+            Two presets are selected based on their ELO ratings, and you can listen to both tracks and select which one you prefer.
 
             The model is fixed to `musicgen-medium`, and melody inputs are not used in this version.
 
