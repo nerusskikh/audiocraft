@@ -23,6 +23,8 @@ from audiocraft.data.audio import audio_write
 from audiocraft.models.encodec import InterleaveStereoCompressionModel
 from audiocraft.models import MusicGen
 
+from preset_tuner import suggest_preset
+
 MODEL = None  # Last used model
 SPACE_ID = os.environ.get('SPACE_ID', '')
 IS_BATCHED = False  # Since we're running locally and not using batched mode
@@ -34,6 +36,9 @@ GENERATED_TRACKS_DIR.mkdir(exist_ok=True)
 
 # We have to wrap subprocess call to clean a bit the log when using gr.make_waveform
 _old_call = sp.call
+
+DEFAULT_ELO = 1500
+NEW_PRESET_PROBA = 0.9
 
 
 def _call_nostderr(*args, **kwargs):
@@ -141,9 +146,9 @@ def load_preset_ratings(filename='preset_ratings.json'):
             return json.load(f)
     else:
         # Initialize all presets with a rating of 1500
-        return {preset['name']: 1500 for preset in generation_presets}
+        return {preset['name']: DEFAULT_ELO for preset in generation_presets}
 
-def save_preset_ratings(preset_ratings, filename='preset_ratings.json'):
+def serialize_to_json(preset_ratings, filename):
     with open(filename, 'w') as f:
         json.dump(preset_ratings, f)
 
@@ -201,12 +206,23 @@ def get_preset_leaderboard_markdown(preset_ratings):
         markdown += f"| {idx} | {preset_name} | {rating:.2f} |\n"
     return markdown
 
+def update_presets(generation_presets, preset_ratings):
+    if np.random.rand() < NEW_PRESET_PROBA:
+        new_preset = suggest_preset(generation_presets, preset_ratings)
+        generation_presets.append(new_preset)
+        preset_ratings[new_preset['name']] = DEFAULT_ELO
+        serialize_to_json(generation_presets, 'presets.json')
+        serialize_to_json(preset_ratings, 'preset_ratings.json')
+        gr.Warning(f"Added new preset: {new_preset['name']}!")
+    
+
 def predict_full(text, duration, session_state, progress=gr.Progress()):
     global INTERRUPTING
     INTERRUPTING = False
     progress(0, desc="Loading model...")
     load_model()
-
+    preset_ratings = load_preset_ratings()
+    update_presets(generation_presets, preset_ratings)
     max_generated = 0
 
     def _progress(generated, to_generate):
@@ -378,8 +394,9 @@ def record_user_choice(preference, preset1, preset2, text_prompt, duration, user
     # Update ratings
     update_elo_ratings(preset1['name'], preset2['name'], preference, preset_ratings)
 
+
     # Save updated ratings
-    save_preset_ratings(preset_ratings)
+    serialize_to_json(preset_ratings, 'preset_ratings.json')
 
 def ui_full(launch_kwargs):
     with gr.Blocks() as interface:
@@ -500,7 +517,6 @@ def ui_full(launch_kwargs):
             [Rest of the markdown content remains unchanged]
             """
         )
-
     interface.queue().launch(**launch_kwargs)
 
 
