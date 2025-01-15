@@ -202,7 +202,7 @@ def sample_presets(N, random_seed=42):
     return sampled_presets
 
 
-def suggest_preset(presets, preset_ratings, ucb_alpha=1., n_random_presets=1000):
+def suggest_preset(presets, preset_ratings, ucb_alpha=2., n_random_presets=1000):
     target = [preset_ratings[preset['name']] for preset in presets]
     feature_array = presets_to_feature_array(presets)
     

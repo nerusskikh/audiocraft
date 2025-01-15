@@ -38,7 +38,8 @@ GENERATED_TRACKS_DIR.mkdir(exist_ok=True)
 _old_call = sp.call
 
 DEFAULT_ELO = 1500
-NEW_PRESET_PROBA = 0.9
+NEW_PRESET_EVERY_N = 25
+NUM_TRIALS = 0
 
 
 def _call_nostderr(*args, **kwargs):
@@ -174,14 +175,15 @@ def update_elo_ratings(preset1_name, preset2_name, preference, preset_ratings, K
     preset_ratings[preset1_name] = R1 + K * (S1 - E1)
     preset_ratings[preset2_name] = R2 + K * (S2 - E2)
 
-def compute_sampling_probabilities(preset_ratings, temperature=400):
+def compute_sampling_probabilities(preset_ratings, temperature=100):
     ratings = np.array(list(preset_ratings.values()))
     names = list(preset_ratings.keys())
 
     # Apply softmax function
     exp_ratings = np.exp(ratings / temperature)
+    exp_ratings += exp_ratings.max()*100*((ratings>(DEFAULT_ELO-1))*(ratings<(DEFAULT_ELO+1)))
+    sampling_weights_raw = dict(zip(names, exp_ratings))
     probabilities = exp_ratings / exp_ratings.sum()
-
     sampling_weights = dict(zip(names, probabilities))
     return sampling_weights
 
@@ -207,7 +209,9 @@ def get_preset_leaderboard_markdown(preset_ratings):
     return markdown
 
 def update_presets(generation_presets, preset_ratings):
-    if np.random.rand() < NEW_PRESET_PROBA:
+    global NUM_TRIALS
+    NUM_TRIALS += 1
+    if NUM_TRIALS and not NUM_TRIALS%NEW_PRESET_EVERY_N:
         new_preset = suggest_preset(generation_presets, preset_ratings)
         generation_presets.append(new_preset)
         preset_ratings[new_preset['name']] = DEFAULT_ELO
